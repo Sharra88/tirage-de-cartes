@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Tirage de cartes 🎴</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; overflow: hidden; background: #0f172a; font-family: Inter, system-ui, sans-serif; color: #e2e8f0; }
+      #zone {
+        position: fixed; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer; user-select: none; -webkit-user-select: none;
+        touch-action: manipulation;
+      }
+      #zone img {
+        max-width: 92vw; max-height: 85vh;
+        border-radius: 14px;
+        box-shadow: 0 20px 60px rgba(0,0,0,.6);
+        display: none;
+      }
+      #hint { text-align: center; padding: 20px; line-height: 1.7; }
+      #hint h1 { font-size: 1.8rem; margin-bottom: .6rem; }
+      #hint p { color: #94a3b8; font-size: 1rem; }
+      #hud {
+        position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+        font-size: .85rem; color: #64748b; background: rgba(15,23,42,.7);
+        padding: 6px 14px; border-radius: 999px; white-space: nowrap; max-width: 92vw; overflow: hidden; text-overflow: ellipsis;
+      }
+      #counter { position: fixed; top: 14px; right: 16px; color: #64748b; font-size: .85rem; }
+      .btn {
+        position: fixed; background: rgba(30,41,59,.85); color: #cbd5e1;
+        border: 1px solid #334155; border-radius: 8px;
+        padding: 7px 12px; font-size: .85rem; cursor: pointer;
+        touch-action: manipulation;
+      }
+      .btn:hover { background: #334155; }
+      #changeBtn { top: 14px; left: 16px; }
+      #clearBtn { top: 56px; left: 16px; font-size: .78rem; padding: 5px 10px; color: #f87171; display: none; }
+      #shuffleNote {
+        position: fixed; bottom: 46px; left: 50%; transform: translateX(-50%);
+        font-size: .8rem; color: #facc15; display: none; white-space: nowrap;
+      }
+      #loader {
+        position: fixed; inset: 0; display: none;
+        align-items: center; justify-content: center;
+        background: rgba(15,23,42,.8); z-index: 10; font-size: 1rem; color: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <input type="file" id="picker" accept="image/*" multiple style="display:none" />
+    <button class="btn" id="changeBtn" title="Changer les images du paquet">🔄 Changer</button>
+    <button class="btn" id="clearBtn" title="Effacer les images enregistrées">🗑 Effacer</button>
+    <div id="counter"></div>
+    <div id="shuffleNote">🎒 Paquet remélangé !</div>
+    <div id="loader">⏳ Chargement du paquet…</div>
+    <div id="zone">
+      <div id="hint">
+        <h1>🎴 Tirage de cartes</h1>
+        <p><strong>1.</strong> Clique pour choisir tes images (elles seront mémorisées)<br />
+        <strong>2.</strong> Ensuite, chaque clic tire une carte au hasard<br />
+        <strong>3.</strong> Sur ordinateur : <kbd>F</kbd> = plein écran</p>
+      </div>
+      <img id="carte" alt="carte tirée" />
+    </div>
+    <div id="hud">Clic = tirer une carte</div>
+
+    <script>
+      let db;
+      function openDB() {
+        return new Promise((res, rej) => {
+          const r = indexedDB.open("tirage-cartes", 1);
+          r.onupgradeneeded = () => r.result.createObjectStore("images");
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        });
+      }
+      function dbGetAll() {
+        return new Promise((res, rej) => {
+          const t = db.transaction("images", "readonly").objectStore("images").getAll();
+          t.onsuccess = () => res(t.result);
+          t.onerror = () => rej(t.error);
+        });
+      }
+      function dbPut(blob) {
+        return new Promise((res, rej) => {
+          const t = db.transaction("images", "readwrite").objectStore("images").add(blob);
+          t.onsuccess = () => res();
+          t.onerror = () => rej(t.error);
+        });
+      }
+      function dbClear() {
+        return new Promise((res, rej) => {
+          const t = db.transaction("images", "readwrite").objectStore("images").clear();
+          t.onsuccess = () => res();
+          t.onerror = () => rej(t.error);
+        });
+      }
+
+      let paquet = [];
+      let total = 0, vues = 0;
+      const zone = document.getElementById("zone");
+      const img = document.getElementById("carte");
+      const hint = document.getElementById("hint");
+      const counter = document.getElementById("counter");
+      const hud = document.getElementById("hud");
+      const note = document.getElementById("shuffleNote");
+      const picker = document.getElementById("picker");
+      const loader = document.getElementById("loader");
+      const clearBtn = document.getElementById("clearBtn");
+
+      function shuffle(a) {
+        for (let i = a.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+      }
+
+      function startPaquet(blobs) {
+        paquet = blobs.map(b => URL.createObjectURL(b));
+        total = paquet.length;
+        vues = 0;
+        shuffle(paquet);
+        hint.style.display = "none";
+        clearBtn.style.display = "block";
+        hud.textContent = "Clic = tirer une carte";
+        tirer();
+      }
+
+      function tirer() {
+        if (!paquet.length) return;
+        if (paquet.length === total && vues > 0) {
+          shuffle(paquet);
+          note.style.display = "block";
+          setTimeout(() => (note.style.display = "none"), 2500);
+        }
+        const carte = paquet.pop();
+        vues++;
+        img.src = carte;
+        img.style.display = "block";
+        counter.textContent = (total - (vues % total)) + " / " + total + " restantes";
+      }
+
+      zone.addEventListener("click", () => {
+        if (!total) picker.click();
+        else tirer();
+      });
+
+      document.getElementById("changeBtn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        picker.click();
+      });
+
+      clearBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Effacer toutes les images enregistrées ?")) return;
+        await dbClear();
+        paquet = []; total = 0; vues = 0;
+        img.style.display = "none";
+        hint.style.display = "block";
+        counter.textContent = "";
+        clearBtn.style.display = "none";
+        hud.textContent = "Clic = choisir des images";
+      });
+
+      picker.addEventListener("change", async () => {
+        const files = Array.from(picker.files).filter(f => f.type.startsWith("image/"));
+        if (!files.length) return;
+        loader.style.display = "flex";
+        await dbClear();
+        for (const f of files) await dbPut(f);
+        startPaquet(files);
+        loader.style.display = "none";
+        picker.value = "";
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "f" || e.key === "F") {
+          if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+          else document.exitFullscreen();
+        }
+      });
+
+      (async () => {
+        try {
+          db = await openDB();
+          const blobs = await dbGetAll();
+          if (blobs && blobs.length) startPaquet(blobs);
+          else hud.textContent = "Clic = choisir des images";
+        } catch (err) {
+          hud.textContent = "Clic = choisir des images";
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -60,7 +60,7 @@
     <button class="btn" id="changeBtn" title="Changer les images du paquet">🔄 Changer</button>
     <button class="btn" id="clearBtn" title="Effacer les images enregistrées">🗑 Effacer</button>
     <div id="counter"></div>
-    <div id="shuffleNote">🎒 Paquet remélagé !</div>
+    <div id="shuffleNote">🎒 Paquet remélangé !</div>
     <div id="loader">
       <div id="loadMsg">⏳ Préparation…</div>
       <div class="bar"><i id="loadBar"></i></div>
@@ -107,7 +107,6 @@
         });
       }
       function dbPutAll(blobs) {
-        // tout enregistrer en UNE transaction, avec suivi
         return new Promise((res, rej) => {
           const tx = db.transaction("images", "readwrite");
           const store = tx.objectStore("images");
@@ -118,13 +117,23 @@
         });
       }
 
+      // ---- Reconstruit le blob en "vrai Blob" compatible IndexedDB (contourne le bug Firefox) ----
+      async function toStorableBlob(blob) {
+        try {
+          const buf = await blob.arrayBuffer();
+          return new Blob([buf], { type: blob.type || "image/jpeg" });
+        } catch (e) {
+          return blob;
+        }
+      }
+
       // ---- Compression avec timeout et repli sur l'original ----
       function compress(file) {
         const MAX = 1600;
         return new Promise((resolve) => {
           let done = false;
           const finish = (r) => { if (!done) { done = true; resolve(r); } };
-          const timeout = setTimeout(() => finish(file), 12000); // 12s max par image
+          const timeout = setTimeout(() => finish(file), 12000);
           const url = URL.createObjectURL(file);
           const im = new Image();
           im.onload = () => {
@@ -225,18 +234,26 @@
         picker.value = "";
         if (!files.length) return;
         showLoader();
-        const compressed = [];
+        let compressed = [];
         let failed = 0;
         try {
           for (let i = 0; i < files.length; i++) {
             loadMsg.textContent = "⏳ Compression " + (i + 1) + " / " + files.length + "…";
             const b = await compress(files[i]);
             if (b) compressed.push(b); else failed++;
-            loadBar.style.width = Math.round(((i + 1) / files.length) * 100) + "%";
+            loadBar.style.width = Math.round(((i + 1) / files.length) * 50) + "%";
           }
+          // reconstruction des blobs pour compatibilité IndexedDB
+          const storable = [];
+          for (let i = 0; i < compressed.length; i++) {
+            storable.push(await toStorableBlob(compressed[i]));
+            loadBar.style.width = (50 + Math.round(((i + 1) / compressed.length) * 30)) + "%";
+          }
+          compressed = storable;
           loadMsg.textContent = "💾 Enregistrement de " + compressed.length + " images…";
           await dbClear();
           await dbPutAll(compressed);
+          loadBar.style.width = "100%";
           if (failed) loadWarn.textContent = "⚠️ " + failed + " image(s) ignorée(s).";
           startPaquet(compressed);
           setTimeout(hideLoader, failed ? 2500 : 300);
@@ -265,7 +282,6 @@
           else hud.textContent = "Clic = choisir des images";
         } catch (err) {
           hud.textContent = "⚠️ Stockage indisponible — clique pour charger des images";
-          loadWarn.textContent = "";
         }
       })();
     </script>

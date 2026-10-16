@@ -43,14 +43,16 @@
       }
       #loader {
         position: fixed; inset: 0; display: none; flex-direction: column; gap: 10px;
-        align-items: center; justify-content: center;
-        background: rgba(15,23,42,.9); z-index: 10; font-size: 1rem; color: #94a3b8;
+        align-items: center; justify-content: center; text-align: center; padding: 20px;
+        background: rgba(15,23,42,.92); z-index: 10; font-size: 1rem; color: #94a3b8;
       }
       #loader .bar {
         width: 60vw; max-width: 300px; height: 8px; border-radius: 999px;
         background: #1e293b; overflow: hidden;
       }
       #loader .bar i { display: block; height: 100%; width: 0%; background: #38bdf8; transition: width .2s; }
+      #loader .warn { color: #facc15; font-size: .85rem; max-width: 90vw; }
+      #loader .btn { position: static; margin-top: 8px; }
     </style>
   </head>
   <body>
@@ -58,10 +60,12 @@
     <button class="btn" id="changeBtn" title="Changer les images du paquet">🔄 Changer</button>
     <button class="btn" id="clearBtn" title="Effacer les images enregistrées">🗑 Effacer</button>
     <div id="counter"></div>
-    <div id="shuffleNote">🎒 Paquet remélangé !</div>
+    <div id="shuffleNote">🎒 Paquet remélagé !</div>
     <div id="loader">
-      <div id="loadMsg">⏳ Compression des images…</div>
+      <div id="loadMsg">⏳ Préparation…</div>
       <div class="bar"><i id="loadBar"></i></div>
+      <div class="warn" id="loadWarn"></div>
+      <button class="btn" id="closeLoader" style="display:none">Fermer</button>
     </div>
     <div id="zone">
       <div id="hint">
@@ -78,23 +82,20 @@
       let db;
       function openDB() {
         return new Promise((res, rej) => {
-          const r = indexedDB.open("tirage-cartes", 1);
-          r.onupgradeneeded = () => r.result.createObjectStore("images");
+          const r = indexedDB.open("tirage-cartes", 2);
+          r.onupgradeneeded = () => {
+            const d = r.result;
+            if (!d.objectStoreNames.contains("images")) d.createObjectStore("images");
+          };
           r.onsuccess = () => res(r.result);
           r.onerror = () => rej(r.error);
+          r.onblocked = () => rej(new Error("blocked"));
         });
       }
       function dbGetAll() {
         return new Promise((res, rej) => {
           const t = db.transaction("images", "readonly").objectStore("images").getAll();
-          t.onsuccess = () => res(t.result);
-          t.onerror = () => rej(t.error);
-        });
-      }
-      function dbPut(blob) {
-        return new Promise((res, rej) => {
-          const t = db.transaction("images", "readwrite").objectStore("images").add(blob);
-          t.onsuccess = () => res();
+          t.onsuccess = () => res(t.result || []);
           t.onerror = () => rej(t.error);
         });
       }
@@ -105,26 +106,42 @@
           t.onerror = () => rej(t.error);
         });
       }
+      function dbPutAll(blobs) {
+        // tout enregistrer en UNE transaction, avec suivi
+        return new Promise((res, rej) => {
+          const tx = db.transaction("images", "readwrite");
+          const store = tx.objectStore("images");
+          blobs.forEach(b => store.add(b));
+          tx.oncomplete = () => res();
+          tx.onerror = () => rej(tx.error);
+          tx.onabort = () => rej(tx.error || new Error("transaction avortée"));
+        });
+      }
 
-      // ---- Compression : max 1600px de côté, JPEG qualité 0.85 ----
+      // ---- Compression avec timeout et repli sur l'original ----
       function compress(file) {
-        return new Promise((res) => {
+        const MAX = 1600;
+        return new Promise((resolve) => {
+          let done = false;
+          const finish = (r) => { if (!done) { done = true; resolve(r); } };
+          const timeout = setTimeout(() => finish(file), 12000); // 12s max par image
           const url = URL.createObjectURL(file);
           const im = new Image();
           im.onload = () => {
-            URL.revokeObjectURL(url);
-            const MAX = 1600;
-            let w = im.width, h = im.height;
-            if (w > MAX || h > MAX) {
-              if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
-              else { w = Math.round(w * MAX / h); h = MAX; }
-            }
-            const c = document.createElement("canvas");
-            c.width = w; c.height = h;
-            c.getContext("2d").drawImage(im, 0, 0, w, h);
-            c.toBlob(b => res(b || file), "image/jpeg", 0.85);
+            try {
+              let w = im.naturalWidth, h = im.naturalHeight;
+              if (!w || !h) { clearTimeout(timeout); URL.revokeObjectURL(url); return finish(file); }
+              if (w > MAX || h > MAX) {
+                if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+                else { w = Math.round(w * MAX / h); h = MAX; }
+              }
+              const c = document.createElement("canvas");
+              c.width = w; c.height = h;
+              c.getContext("2d").drawImage(im, 0, 0, w, h);
+              c.toBlob(b => { clearTimeout(timeout); URL.revokeObjectURL(url); finish(b || file); }, "image/jpeg", 0.85);
+            } catch (e) { clearTimeout(timeout); URL.revokeObjectURL(url); finish(file); }
           };
-          im.onerror = () => res(file);
+          im.onerror = () => { clearTimeout(timeout); URL.revokeObjectURL(url); finish(file); };
           im.src = url;
         });
       }
@@ -141,6 +158,8 @@
       const loader = document.getElementById("loader");
       const loadBar = document.getElementById("loadBar");
       const loadMsg = document.getElementById("loadMsg");
+      const loadWarn = document.getElementById("loadWarn");
+      const closeLoader = document.getElementById("closeLoader");
       const clearBtn = document.getElementById("clearBtn");
 
       function shuffle(a) {
@@ -150,6 +169,9 @@
         }
         return a;
       }
+
+      function showLoader() { loader.style.display = "flex"; closeLoader.style.display = "none"; loadWarn.textContent = ""; }
+      function hideLoader() { loader.style.display = "none"; }
 
       function startPaquet(blobs) {
         paquet = blobs.map(b => URL.createObjectURL(b));
@@ -189,7 +211,7 @@
       clearBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         if (!confirm("Effacer toutes les images enregistrées ?")) return;
-        await dbClear();
+        try { await dbClear(); } catch (err) {}
         paquet = []; total = 0; vues = 0;
         img.style.display = "none";
         hint.style.display = "block";
@@ -200,22 +222,33 @@
 
       picker.addEventListener("change", async () => {
         const files = Array.from(picker.files).filter(f => f.type.startsWith("image/"));
-        if (!files.length) return;
-        loader.style.display = "flex";
-        loadBar.style.width = "0%";
-        await dbClear();
-        const compressed = [];
-        for (let i = 0; i < files.length; i++) {
-          loadMsg.textContent = "⏳ Compression " + (i + 1) + " / " + files.length + "…";
-          compressed.push(await compress(files[i]));
-          loadBar.style.width = Math.round(((i + 1) / files.length) * 100) + "%";
-        }
-        loadMsg.textContent = "💾 Enregistrement…";
-        for (const b of compressed) await dbPut(b);
-        startPaquet(compressed);
-        loader.style.display = "none";
         picker.value = "";
+        if (!files.length) return;
+        showLoader();
+        const compressed = [];
+        let failed = 0;
+        try {
+          for (let i = 0; i < files.length; i++) {
+            loadMsg.textContent = "⏳ Compression " + (i + 1) + " / " + files.length + "…";
+            const b = await compress(files[i]);
+            if (b) compressed.push(b); else failed++;
+            loadBar.style.width = Math.round(((i + 1) / files.length) * 100) + "%";
+          }
+          loadMsg.textContent = "💾 Enregistrement de " + compressed.length + " images…";
+          await dbClear();
+          await dbPutAll(compressed);
+          if (failed) loadWarn.textContent = "⚠️ " + failed + " image(s) ignorée(s).";
+          startPaquet(compressed);
+          setTimeout(hideLoader, failed ? 2500 : 300);
+        } catch (err) {
+          loadMsg.textContent = "❌ Erreur d'enregistrement";
+          loadWarn.textContent = (err && err.message ? err.message : "Erreur inconnue") + " — les images restent affichées pour cette session.";
+          closeLoader.style.display = "block";
+          if (compressed.length) startPaquet(compressed);
+        }
       });
+
+      closeLoader.addEventListener("click", hideLoader);
 
       document.addEventListener("keydown", (e) => {
         if (e.key === "f" || e.key === "F") {
@@ -231,7 +264,8 @@
           if (blobs && blobs.length) startPaquet(blobs);
           else hud.textContent = "Clic = choisir des images";
         } catch (err) {
-          hud.textContent = "Clic = choisir des images";
+          hud.textContent = "⚠️ Stockage indisponible — clique pour charger des images";
+          loadWarn.textContent = "";
         }
       })();
     </script>
